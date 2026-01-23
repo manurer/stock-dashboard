@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import pandas_ta as ta
 import datetime
 import requests
 import urllib3
@@ -8,6 +7,8 @@ import json
 import os
 import time
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots # 🔥 新增：匯入子圖功能
+import stock_logic  # 匯入共用邏輯
 
 # 1. --- 基礎設定 ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -95,7 +96,6 @@ def get_historical_data(symbol_id):
     except: return None
 
 # 4. --- 核心運算 ---
-
 def merge_realtime_data(df, realtime_data):
     if df is None or realtime_data is None: return df
     
@@ -138,133 +138,6 @@ def resample_timeframe(df, timeframe):
     except:
         return df
 
-def calculate_indicators(df):
-    df['MA5'] = ta.sma(df['Close'], length=5)
-    df['MA10'] = ta.sma(df['Close'], length=10)
-    df['MA20'] = ta.sma(df['Close'], length=20)
-    if len(df) >= 60:
-        df['MA60'] = ta.sma(df['Close'], length=60)
-    else:
-        df['MA60'] = None
-
-    df['RSI'] = ta.rsi(df['Close'], length=14)
-    
-    stoch = ta.stoch(df['High'], df['Low'], df['Close'], k=9, d=3, smooth_k=3)
-    if stoch is not None:
-        k_col = [c for c in stoch.columns if c.startswith('STOCHk')][0]
-        d_col = [c for c in stoch.columns if c.startswith('STOCHd')][0]
-        df['K'] = stoch[k_col]
-        df['D'] = stoch[d_col]
-
-    macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-    if macd is not None:
-        hist_col = [c for c in macd.columns if c.startswith('MACDh')][0]
-        df['MACD_Hist'] = macd[hist_col]
-
-    bbands = ta.bbands(df['Close'], length=20, std=2)
-    if bbands is not None:
-        upper_col = [c for c in bbands.columns if c.startswith('BBU')][0]
-        lower_col = [c for c in bbands.columns if c.startswith('BBL')][0]
-        df['BB_Upper'] = bbands[upper_col]
-        df['BB_Lower'] = bbands[lower_col]
-
-    if 'MA20' in df.columns:
-        df['BIAS_20'] = ((df['Close'] - df['MA20']) / df['MA20']) * 100
-    
-    df['Donchian_High'] = df['High'].rolling(window=20).max().shift(1)
-    df['Donchian_Low'] = df['Low'].rolling(window=20).min().shift(1)
-    df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-
-    return df
-
-def generate_detailed_report(df, timeframe_label="日線"):
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
-    score = 0
-    report = []
-    score_details = []
-    
-    ma_term = "月線" if timeframe_label == "日線" else "20MA"
-
-    # A. 基礎趨勢
-    if pd.notna(curr.get('MA20')):
-        if curr['Close'] > curr['MA20']:
-            report.append(f"✅ **趨勢偏多**：股價站上 {ma_term}。")
-            score += 2
-            score_details.append((f"站上{ma_term}", "+2"))
-        else:
-            report.append(f"🔻 **趨勢偏空**：股價跌破 {ma_term}。")
-            score -= 2
-            score_details.append((f"跌破{ma_term}", "-2"))
-
-    if pd.notna(curr.get('MA5')) and pd.notna(curr.get('MA20')):
-        if curr['MA5'] > curr['MA20'] and prev['MA5'] <= prev['MA20']:
-            report.append(f"✨ **均線黃金交叉**：5MA突破 {ma_term}。")
-            score += 3
-            score_details.append(("均線金叉", "+3"))
-    
-    # B. 波段訊號
-    if pd.notna(curr.get('Donchian_High')):
-        if curr['Close'] > curr['Donchian_High'] and prev['Close'] <= prev['Donchian_High']:
-            report.append("🔥 **突破箱型 (唐奇安)**：創20K新高。")
-            score += 3
-            score_details.append(("唐奇安突破", "+3"))
-    
-    if pd.notna(curr.get('BIAS_20')):
-        if curr['BIAS_20'] > 15:
-            report.append("⚠️ **乖離過大 (>15%)**：短線過熱。")
-            score -= 2
-            score_details.append(("乖離率過大", "-2"))
-        elif curr['BIAS_20'] < -12:
-            report.append("💎 **負乖離過大 (<-12%)**：短線超跌。")
-            score += 1
-            score_details.append(("負乖離超跌", "+1"))
-
-    # C. 動能與震盪
-    if pd.notna(curr.get('K')):
-        if curr['K'] > curr['D'] and prev['K'] <= prev['D'] and curr['K'] < 50:
-            report.append("🏹 **KD 低檔黃金交叉**：反彈訊號。")
-            score += 2
-            score_details.append(("KD低檔金叉", "+2"))
-        elif curr['K'] < curr['D'] and prev['K'] >= prev['D'] and curr['K'] > 80:
-            report.append("⚠️ **KD 高檔死亡交叉**：修正訊號。")
-            score -= 2
-            score_details.append(("KD高檔死叉", "-2"))
-            
-    if pd.notna(curr.get('MACD_Hist')):
-        if curr['MACD_Hist'] > 0 and prev['MACD_Hist'] <= 0:
-            report.append("🐂 **MACD 翻紅**：動能轉強。")
-            score += 2
-            score_details.append(("MACD翻紅", "+2"))
-        elif curr['MACD_Hist'] < 0:
-            report.append("🐻 **MACD 綠柱**：空方主導。")
-            score -= 1
-            score_details.append(("MACD綠柱", "-1"))
-
-    if pd.notna(curr.get('BB_Upper')):
-        if curr['Close'] >= curr['BB_Upper']:
-            report.append("🚀 **布林通道突破**：沿上軌噴出。")
-            score += 2
-            score_details.append(("布林突破", "+2"))
-    
-    score_str = "**📝 詳細得分表：**\n\n"
-    for item, pts in score_details:
-        score_str += f"- {item}: {pts}\n"
-    score_str += f"\n**🏆 總分：{score} 分**"
-
-    # D. ATR 風控
-    stop_loss_price = None
-    if pd.notna(curr.get('ATR')):
-        stop_loss_price = curr['Close'] - (2 * curr['ATR'])
-        report.append(f"🛡️ **風控建議 (ATR)**：建議停損價 **{stop_loss_price:.2f}**。")
-
-    if score >= 5: decision, color = "強力買進", "#FF0000"
-    elif score > 0: decision, color = "偏多操作", "#FFA500"
-    elif score <= -3: decision, color = "建議賣出", "#008000"
-    else: decision, color = "觀望整理", "#808080"
-    
-    return decision, color, report, curr, score_str
-
 # 5. --- 介面顯示區 ---
 
 st.sidebar.title("🎛️ 戰情控制台")
@@ -305,10 +178,13 @@ if page == "📊 戰情總覽":
                     if hist_data is not None:
                         try:
                             df_merged = merge_realtime_data(hist_data, real_data)
-                            df_final = calculate_indicators(df_merged)
-                            decision, color_code, _, _, _ = generate_detailed_report(df_final)
-                            signal_text = decision
-                            signal_color = color_code
+                            
+                            # 🔥 使用共用邏輯 🔥
+                            df_final = stock_logic.calculate_indicators(df_merged)
+                            result = stock_logic.analyze_strategy(df_final)
+                            
+                            signal_text = result["decision"]
+                            signal_color = result["color"]
                         except:
                             signal_text = "數據不足"
                     
@@ -361,8 +237,22 @@ elif page == "🔍 個股深度診斷":
             if df_h is not None:
                 df_merged = merge_realtime_data(df_h, real)
                 df_resampled = resample_timeframe(df_merged, timeframe)
-                df_final = calculate_indicators(df_resampled)
-                decision, color, reports, curr, score_str = generate_detailed_report(df_final, timeframe)
+                
+                # 🔥 使用共用邏輯 🔥
+                df_final = stock_logic.calculate_indicators(df_resampled)
+                result = stock_logic.analyze_strategy(df_final, timeframe)
+                
+                # 解包結果
+                curr = df_final.iloc[-1]
+                decision = result["decision"]
+                color = result["color"]
+                reports = result["report_list"]
+                
+                # 重組得分表字串
+                score_str = "**📝 詳細得分表：**\n\n"
+                for item, pts in result["score_details"]:
+                    score_str += f"- {item}: {pts}\n"
+                score_str += f"\n**🏆 總分：{result['score']} 分**"
                 
                 name = real['name'] if real else target
                 st.subheader(f"{target} {name} - {timeframe}戰情")
@@ -412,11 +302,47 @@ elif page == "🔍 個股深度診斷":
                         </div>
                     """, unsafe_allow_html=True)
                     
-                    st.divider()
                     with st.expander("📄 詳細診斷報告 (含停損建議)", expanded=True):
-                        for r in reports: st.write(r)
-                        if not reports: st.write("目前技術面呈現盤整。")
-                
+                        for r in reports:
+                            if "OBV" in r:
+                                # 使用 \n 手動換行，避免 Python 縮排造成 Markdown 誤判為程式碼區塊
+                                obv_msg = (
+                                    "📊 **【OBV 能量潮原理】**\n"
+                                    "它是從一年前開始累計的「籌碼總量」。\n"
+                                    "邏輯：紅K(漲)就加量，黑K(跌)就扣量。\n\n"
+                                    "💡 **實戰意義：抓主力**\n"
+                                    "若股價還在盤整，但 OBV 曲線率先創高，"
+                                    "代表主力正在偷吃貨，是大漲前兆！"
+                                )
+                                st.markdown(r, help=obv_msg)
+                            
+                            elif "ADX" in r:
+                                adx_msg = (
+                                    "💪 **【ADX 趨勢強度】**\n"
+                                    "• < 20 (盤整)：無趨勢，均線易失效。\n"
+                                    "• > 25 (趨勢)：趨勢成形，順勢操作。\n"
+                                    "• 數值向上：代表趨勢正在加速中！"
+                                )
+                                st.markdown(r, help=adx_msg)
+
+                                # 🔥 新增這一段：ATR 停損說明
+                            elif "ATR" in r:
+                                atr_msg = (
+                                    "🛡️ **【ATR 波動率停損】**\n"
+                                    "公式：收盤價 - (2 × ATR)\n\n"
+                                    "💡 **原理說明：**\n"
+                                    "ATR 代表這檔股票近期的「正常震幅」。\n"
+                                    "設定 2 倍 ATR 的寬度，是為了留給股價\n"
+                                    "「正常呼吸」的空間，避免被一般雜訊洗出場。\n"
+                                    "若跌破此價位，代表趨勢真的反轉了。"
+                                )
+                                st.markdown(r, help=atr_msg)
+                                 
+                            else:
+                                st.markdown(r)
+
+                        if not reports: st.write("目前技術面呈現盤整。")    
+
                 with order_col:
                     st.markdown("##### ⚡ 五檔掛單")
                     if real and (real['asks'] or real['bids']):
@@ -428,20 +354,31 @@ elif page == "🔍 個股深度診斷":
                     else: st.caption("盤後或無掛單資料")
 
                 st.subheader(f"📈 {timeframe} 技術圖表")
-                tab1, tab2 = st.tabs(["主圖 (K線+均線+通道)", "副圖 (MACD & KD)"])
+                tab1, tab2 = st.tabs(["主圖 (K線+均線+通道+成交量)", "副圖 (MACD & KD)"])
                 
                 with tab1:
-                    df_plot = df_final.tail(150)
+                    df_plot = df_final.tail(150).copy()
                     
-                    # --- 關鍵修正：將日期轉為字串 (Category)，解決無交易日空缺問題 ---
-                    # 1. 將日期格式化為字串 (YYYY-MM-DD)
+                    # 1. 準備繪圖資料
                     df_plot['DateStr'] = df_plot.index.strftime('%Y-%m-%d')
                     
-                    fig = go.Figure()
+                    # 計算成交量顏色 (漲紅跌綠)
+                    # 邏輯：今天收盤 >= 開盤，或比昨天漲 -> 紅色
+                    df_plot['Color'] = df_plot.apply(lambda x: '#FF0000' if x['Close'] >= x['Open'] else '#008000', axis=1)
+
+                    # 2. 建立子圖 (2列1行，共用X軸)
+                    # row_heights=[0.7, 0.3] 代表上面K線佔70%，下面成交量佔30%
+                    fig = make_subplots(
+                        rows=2, cols=1, 
+                        shared_xaxes=True, 
+                        vertical_spacing=0.05, 
+                        row_heights=[0.7, 0.3],
+                        subplot_titles=(f'{target} 走勢', '成交量')
+                    )
                     
-                    # 2. 修改 x 軸資料來源為 DateStr
+                    # 3. 上圖：K線與均線 (Row 1)
                     fig.add_trace(go.Candlestick(
-                        x=df_plot['DateStr'], # 使用字串軸
+                        x=df_plot['DateStr'],
                         open=df_plot['Open'],
                         high=df_plot['High'],
                         low=df_plot['Low'],
@@ -449,25 +386,32 @@ elif page == "🔍 個股深度診斷":
                         increasing_line_color='red', 
                         decreasing_line_color='green',
                         name='K線'
-                    ))
+                    ), row=1, col=1)
                     
-                    if 'MA5' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['MA5'], line=dict(color='#FFD700', width=1), name='MA5'))
-                    if 'MA20' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['MA20'], line=dict(color='#0000FF', width=1), name='MA20'))
-                    
-                    if 'BB_Upper' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['BB_Upper'], line=dict(color='purple', width=1, dash='dot'), name='布林上'))
-                    if 'BB_Lower' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['BB_Lower'], line=dict(color='purple', width=1, dash='dot'), name='布林下'))
+                    if 'MA5' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['MA5'], line=dict(color='#FFD700', width=1), name='MA5'), row=1, col=1)
+                    if 'MA20' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['MA20'], line=dict(color='#0000FF', width=1), name='MA20'), row=1, col=1)
+                    if 'BB_Upper' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['BB_Upper'], line=dict(color='purple', width=1, dash='dot'), name='布林上'), row=1, col=1)
+                    if 'BB_Lower' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['BB_Lower'], line=dict(color='purple', width=1, dash='dot'), name='布林下'), row=1, col=1)
+                    if 'Donchian_High' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['Donchian_High'], line=dict(color='gray', width=1, dash='dash'), name='唐奇安上'), row=1, col=1)
 
-                    if 'Donchian_High' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['Donchian_High'], line=dict(color='gray', width=1, dash='dash'), name='唐奇安上'))
+                    # 4. 下圖：成交量 (Row 2)
+                    fig.add_trace(go.Bar(
+                        x=df_plot['DateStr'],
+                        y=df_plot['Volume'],
+                        marker_color=df_plot['Color'], # 使用漲跌顏色
+                        name='成交量'
+                    ), row=2, col=1)
 
+                    # 5. 更新版面設定
                     fig.update_layout(
-                        height=500,
-                        margin=dict(l=20, r=20, t=20, b=20),
+                        height=600, # 加高一點讓兩個圖都清楚
+                        margin=dict(l=20, r=20, t=30, b=20),
                         xaxis_rangeslider_visible=False,
-                        # 3. 強制設定 X 軸為類別型 (Category)，並優化標籤密度
-                        xaxis=dict(
+                        # 設定 X 軸 (只對最下方的軸設定即可)
+                        xaxis2=dict(
                             type='category', 
-                            nticks=8,  # 限制顯示標籤數量，避免擁擠
-                            tickangle=-0 # 標籤不旋轉
+                            nticks=8, 
+                            tickangle=-0
                         )
                     )
                     st.plotly_chart(fig, use_container_width=True)

@@ -21,7 +21,7 @@ jobs:
     - name: Set up Python (安裝 Python)
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.12'
 
     - name: Install dependencies (安裝套件)
       run: |
