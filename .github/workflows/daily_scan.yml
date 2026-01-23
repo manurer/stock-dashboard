@@ -1,0 +1,37 @@
+name: Daily Stock Scan
+
+on:
+  schedule:
+    # 設定執行時間
+    # GitHub 使用 UTC 時間，台灣是 UTC+8
+    # 我們想要台灣下午 13:40 執行 -> UTC 05:40
+    - cron: '40 5 * * 1-5' # 週一到週五 UTC 05:40 執行
+  
+  # 允許手動點擊按鈕觸發 (方便測試用)
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code (下載程式碼)
+      uses: actions/checkout@v3
+
+    - name: Set up Python (安裝 Python)
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies (安裝套件)
+      run: |
+        pip install requests pandas pandas_ta
+
+    - name: Run Scan Bot
+      env:
+        FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
+        # 修改這裡，對應新的變數名稱
+        LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+        LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+      run: |
+        python bot.py
