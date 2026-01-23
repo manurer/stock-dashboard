@@ -1,8 +1,0 @@
-# 忽略 Streamlit 的秘密檔案
-.streamlit/secrets.toml
-
-# 忽略 Python 編譯檔 (選填，建議加)
-__pycache__/
-*.pyc
-
-舊/
