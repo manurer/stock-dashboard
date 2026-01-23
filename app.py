@@ -7,8 +7,8 @@ import json
 import os
 import time
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots # 🔥 新增：匯入子圖功能
-import stock_logic  # 匯入共用邏輯
+from plotly.subplots import make_subplots
+import stock_logic
 
 # 1. --- 基礎設定 ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -162,56 +162,126 @@ if page == "📊 戰情總覽":
     st.title("📊 多檔股票戰情總覽")
     if not st.session_state.watchlist: st.info("清單是空的")
     else:
-        if len(st.session_state.watchlist) > 8:
-            st.warning("⚠️ 關注股票較多，載入分析數據可能需要一點時間...")
-            
-        cols = st.columns(4)
+        # 1. 批次資料處理 (Batch Processing)
+        # 建立進度條，讓使用者知道程式正在跑
+        progress_bar = st.progress(0, text="正在啟動戰情掃描雷達...")
+        
+        results_cache = [] # 用來儲存所有股票的分析結果
+        
+        total_stocks = len(st.session_state.watchlist)
+        
         for i, symbol in enumerate(st.session_state.watchlist):
+            # 更新進度條
+            percent = int(((i) / total_stocks) * 100)
+            progress_bar.progress(percent, text=f"正在分析 {symbol} ({i+1}/{total_stocks})...")
+            
+            # API 呼叫緩衝
             time.sleep(1.0) 
-            with cols[i % 4]:
-                real_data = get_realtime_quote_full(symbol)
-                signal_text = "分析中..."
-                signal_color = "#888"
+            
+            real_data = get_realtime_quote_full(symbol)
+            stock_result = {
+                "symbol": symbol,
+                "name": symbol,
+                "price": 0.0,
+                "change": 0.0,
+                "pct": 0.0,
+                "score": 0,
+                "signal": "資料不足",
+                "color": "#888",
+                "stop_loss": None,
+                "raw_real": None
+            }
+            
+            if real_data:
+                stock_result["name"] = real_data['name']
+                stock_result["price"] = real_data['price']
+                stock_result["change"] = real_data['change']
+                stock_result["pct"] = real_data['change_percent']
+                stock_result["raw_real"] = real_data # 存起來等等畫卡片用
                 
-                if real_data:
-                    hist_data = get_historical_data(symbol)
-                    if hist_data is not None:
-                        try:
-                            df_merged = merge_realtime_data(hist_data, real_data)
-                            
-                            # 🔥 使用共用邏輯 🔥
-                            df_final = stock_logic.calculate_indicators(df_merged)
-                            result = stock_logic.analyze_strategy(df_final)
-                            
-                            signal_text = result["decision"]
-                            signal_color = result["color"]
-                        except:
-                            signal_text = "數據不足"
-                    
-                    change = real_data['change']
-                    pct = real_data['change_percent']
-                    price_color = "#FF0000" if change > 0 else "#008000" if change < 0 else "#666666"
-                    
-                    st.markdown(f"""
-                    <div style="border:1px solid #ddd; padding:10px; border-radius:10px; margin-bottom:10px; background-color:#1E1E1E;">
-                        <div style="font-size:16px; font-weight:bold; color:#FFF;">
-                            {real_data['symbol']} {real_data['name']}
-                        </div>
-                        <div style="margin-top:5px; margin-bottom:5px;">
-                            <span style="background-color:{signal_color}; color:white; padding:2px 8px; border-radius:4px; font-size:12px;">
-                                {signal_text}
-                            </span>
-                        </div>
-                        <div style="font-size:24px; font-weight:bold; color:{price_color};">
-                            {real_data['price']}
-                        </div>
-                        <div style="font-size:14px; color:{price_color};">
-                            {change} ({pct}%)
-                        </div>
+                hist_data = get_historical_data(symbol)
+                if hist_data is not None:
+                    try:
+                        df_merged = merge_realtime_data(hist_data, real_data)
+                        df_final = stock_logic.calculate_indicators(df_merged)
+                        logic_res = stock_logic.analyze_strategy(df_final)
+                        
+                        stock_result["score"] = logic_res["score"]
+                        stock_result["signal"] = logic_res["decision"]
+                        stock_result["color"] = logic_res["color"]
+                        stock_result["stop_loss"] = logic_res["stop_loss"]
+                    except Exception as e:
+                        print(f"Error analyzing {symbol}: {e}")
+            
+            results_cache.append(stock_result)
+
+        progress_bar.empty() # 跑完後隱藏進度條
+
+        # 2. 顯示戰情總表 (Dashboard Table)
+        st.subheader("📋 全域戰情排行榜")
+        
+        if results_cache:
+            # 整理成 DataFrame
+            df_summary = pd.DataFrame(results_cache)
+            
+            # 挑選要顯示的欄位並改名
+            display_df = df_summary[["symbol", "name", "price", "pct", "score", "signal", "stop_loss"]].copy()
+            display_df.columns = ["代號", "名稱", "現價", "漲跌幅(%)", "AI總分", "訊號", "建議停損"]
+            
+            # 使用 Streamlit 的資料框顯示功能 (支援排序)
+            st.dataframe(
+                display_df.style.background_gradient(subset=["AI總分"], cmap="RdYlGn"), # 讓分數有顏色深淺
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "現價": st.column_config.NumberColumn(format="%.2f"),
+                    "漲跌幅(%)": st.column_config.NumberColumn(format="%.2f%%"),
+                    "建議停損": st.column_config.NumberColumn(format="%.2f"),
+                    "AI總分": st.column_config.NumberColumn(help="越高分越好，滿分 6 分以上為強力買進"),
+                }
+            )
+
+        st.divider()
+
+        # 3. 顯示卡片牆 (Card View)
+        st.subheader("🃏 個股詳細卡片")
+        cols = st.columns(4)
+        for i, data in enumerate(results_cache):
+            with cols[i % 4]:
+                # 這裡直接用剛剛算好的 data，不用再 call API 了！
+                symbol = data["symbol"]
+                name = data["name"]
+                price = data["price"]
+                change = data["change"]
+                pct = data["pct"]
+                signal_text = data["signal"]
+                signal_color = data["color"]
+                
+                price_color = "#FF0000" if change > 0 else "#008000" if change < 0 else "#666666"
+                
+                # 簡單的卡片 HTML
+                st.markdown(f"""
+                <div style="border:1px solid #ddd; padding:10px; border-radius:10px; margin-bottom:10px; background-color:#1E1E1E;">
+                    <div style="font-size:16px; font-weight:bold; color:#FFF;">
+                        {symbol} {name}
                     </div>
-                    """, unsafe_allow_html=True)
-                    st.button(f"🔍 詳細 {real_data['name']}", key=f"btn_{symbol}", on_click=go_to_analysis, args=(symbol,))
-                else: st.metric(symbol, "--", "連線失敗")
+                    <div style="margin-top:5px; margin-bottom:5px;">
+                        <span style="background-color:{signal_color}; color:white; padding:2px 8px; border-radius:4px; font-size:12px;">
+                            {signal_text} ({data['score']}分)
+                        </span>
+                    </div>
+                    <div style="font-size:24px; font-weight:bold; color:{price_color};">
+                        {price}
+                    </div>
+                    <div style="font-size:14px; color:{price_color};">
+                        {change} ({pct}%)
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # 按鈕邏輯
+                st.button(f"🔍 詳細 {name}", key=f"btn_{symbol}", on_click=go_to_analysis, args=(symbol,))
+
 
 elif page == "🔍 個股深度診斷":
     st.title("🔍 個股深度診斷")
@@ -305,7 +375,6 @@ elif page == "🔍 個股深度診斷":
                     with st.expander("📄 詳細診斷報告 (含停損建議)", expanded=True):
                         for r in reports:
                             if "OBV" in r:
-                                # 使用 \n 手動換行，避免 Python 縮排造成 Markdown 誤判為程式碼區塊
                                 obv_msg = (
                                     "📊 **【OBV 能量潮原理】**\n"
                                     "它是從一年前開始累計的「籌碼總量」。\n"
@@ -325,7 +394,6 @@ elif page == "🔍 個股深度診斷":
                                 )
                                 st.markdown(r, help=adx_msg)
 
-                                # 🔥 新增這一段：ATR 停損說明
                             elif "ATR" in r:
                                 atr_msg = (
                                     "🛡️ **【ATR 波動率停損】**\n"
@@ -359,15 +427,9 @@ elif page == "🔍 個股深度診斷":
                 with tab1:
                     df_plot = df_final.tail(150).copy()
                     
-                    # 1. 準備繪圖資料
                     df_plot['DateStr'] = df_plot.index.strftime('%Y-%m-%d')
-                    
-                    # 計算成交量顏色 (漲紅跌綠)
-                    # 邏輯：今天收盤 >= 開盤，或比昨天漲 -> 紅色
                     df_plot['Color'] = df_plot.apply(lambda x: '#FF0000' if x['Close'] >= x['Open'] else '#008000', axis=1)
 
-                    # 2. 建立子圖 (2列1行，共用X軸)
-                    # row_heights=[0.7, 0.3] 代表上面K線佔70%，下面成交量佔30%
                     fig = make_subplots(
                         rows=2, cols=1, 
                         shared_xaxes=True, 
@@ -375,8 +437,36 @@ elif page == "🔍 個股深度診斷":
                         row_heights=[0.7, 0.3],
                         subplot_titles=(f'{target} 走勢', '成交量')
                     )
+
+                    recent_df = df_plot.tail(60)
+                    high_price = recent_df['High'].max()
+                    low_price = recent_df['Low'].min()
                     
-                    # 3. 上圖：K線與均線 (Row 1)
+                    diff = high_price - low_price
+                    fib_0382 = high_price - (diff * 0.382)
+                    fib_0618 = high_price - (diff * 0.618)
+                    
+                    fig.add_shape(type="line",
+                        x0=recent_df['DateStr'].iloc[0], y0=fib_0382,
+                        x1=recent_df['DateStr'].iloc[-1], y1=fib_0382,
+                        line=dict(color="orange", width=1, dash="dot"),
+                        row=1, col=1
+                    )
+                    fig.add_annotation(x=recent_df['DateStr'].iloc[-1], y=fib_0382,
+                        text="Fib 0.382 (強勢回檔)", showarrow=False, xanchor="left", font=dict(color="orange"), row=1, col=1)
+
+                    fig.add_shape(type="line",
+                        x0=recent_df['DateStr'].iloc[0], y0=fib_0618,
+                        x1=recent_df['DateStr'].iloc[-1], y1=fib_0618,
+                        line=dict(color="green", width=2, dash="dash"),
+                        row=1, col=1
+                    )
+                    fig.add_annotation(x=recent_df['DateStr'].iloc[-1], y=fib_0618,
+                        text="Fib 0.618 (支撐)", showarrow=False, xanchor="left", font=dict(color="green"), row=1, col=1)
+
+                    fig.add_shape(type="line", x0=recent_df['DateStr'].iloc[0], y0=high_price, x1=recent_df['DateStr'].iloc[-1], y1=high_price, line=dict(color="gray", width=1, dash="dot"), row=1, col=1)
+                    fig.add_shape(type="line", x0=recent_df['DateStr'].iloc[0], y0=low_price, x1=recent_df['DateStr'].iloc[-1], y1=low_price, line=dict(color="gray", width=1, dash="dot"), row=1, col=1)
+
                     fig.add_trace(go.Candlestick(
                         x=df_plot['DateStr'],
                         open=df_plot['Open'],
@@ -394,20 +484,17 @@ elif page == "🔍 個股深度診斷":
                     if 'BB_Lower' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['BB_Lower'], line=dict(color='purple', width=1, dash='dot'), name='布林下'), row=1, col=1)
                     if 'Donchian_High' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['Donchian_High'], line=dict(color='gray', width=1, dash='dash'), name='唐奇安上'), row=1, col=1)
 
-                    # 4. 下圖：成交量 (Row 2)
                     fig.add_trace(go.Bar(
                         x=df_plot['DateStr'],
                         y=df_plot['Volume'],
-                        marker_color=df_plot['Color'], # 使用漲跌顏色
+                        marker_color=df_plot['Color'],
                         name='成交量'
                     ), row=2, col=1)
 
-                    # 5. 更新版面設定
                     fig.update_layout(
-                        height=600, # 加高一點讓兩個圖都清楚
+                        height=600,
                         margin=dict(l=20, r=20, t=30, b=20),
                         xaxis_rangeslider_visible=False,
-                        # 設定 X 軸 (只對最下方的軸設定即可)
                         xaxis2=dict(
                             type='category', 
                             nticks=8, 
@@ -415,6 +502,12 @@ elif page == "🔍 個股深度診斷":
                         )
                     )
                     st.plotly_chart(fig, use_container_width=True)
+
+                    st.info("""
+                    **📉 黃金分割參考線說明：**
+                    * **🟠 Fib 0.382 (強勢回檔)**：股價回檔較淺，代表買盤強勁。若守住此線不破，通常是強勢股續攻的特徵。
+                    * **🟢 Fib 0.618 (黃金支撐)**：回檔至黃金比例，通常是波段操作 CP 值(風險回報比) 最佳的進場點。
+                    """)
                 
                 with tab2:
                     st.caption("KD 指標 (紅K / 藍D)")
