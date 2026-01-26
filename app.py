@@ -9,6 +9,8 @@ import time
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import stock_logic
+import pytz
+
 
 # 1. --- 基礎設定 ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -21,6 +23,52 @@ except FileNotFoundError:
     st.stop()
 
 st.set_page_config(layout="wide", page_title="量化股市戰情室")
+
+
+# --- 🔥 新增：評分標準說明視窗 (使用 @st.dialog) ---
+@st.dialog("📊 AI 量化戰情室 - 評分標準詳解")
+def show_score_rules():
+    st.markdown("""
+    本系統採用 **「攻守兼備」** 的量化評分模型。
+    總分無上限，**> 6 分** 為強力買訊；一旦出現 **扣分項**，建議優先避開風險。
+
+    ---
+    ### 🛡️ 空方防禦 (Risk Defense) - 優先避開！
+    * **-4 分**：💀 **爆量長黑** (跌 >3% 且 量 > 2倍均量) ➤ 主力恐慌出貨。
+    * **-3 分**：💔 **跌破季線 (60MA)** ➤ 生命線斷裂，中長線轉空。
+    * **-3 分**：💸 **投信大砍** (>500張) 或 **連三賣** ➤ 法人棄養結帳。
+    * **-2 分**：🕯️ **空頭吞噬** (昨紅今黑且吃掉漲幅) ➤ 反轉訊號。
+    * **-2 分**：🐌 **ADX < 20 (盤整泥沼)** ➤ 無趨勢狀態，均線易失效。
+    * **-2 分**：⚠️ **乖離率 > 15%** ➤ 短線過熱，隨時回檔。
+
+    ---
+    ### 🏦 法人籌碼 (Chips) - 波段靈魂
+    * **+3 分**：🔥 **投信連三買** ➤ 籌碼鎖定，波段趨勢確立。
+    * **+3 分**：🚀 **投信首日點火** (且突破關鍵價) ➤ 起漲第一根。
+    * **+1 分**：⏳ **投信趨勢偏多** (累積買超或試單) ➤ 籌碼正向。
+    * **+1 分**：💰 **OBV > 月均量** ➤ 買盤資金持續進駐。
+
+    ---
+    ### 📈 趨勢與動能 (Trend & Momentum)
+    * **+3 分**：✨ **5MA 金叉 20MA** ➤ 短線轉強，帶動波段。
+    * **+2 分**：✅ **站上 20MA (月線)** ➤ 多頭趨勢確立。
+    * **+2 分**：🏹 **KD 低檔金叉** (< 50) ➤ 反彈訊號。
+    * **+2 分**：🐂 **MACD 翻紅** (柱狀圖轉正) ➤ 主力動能轉強。
+    * **+1 分**：🚄 **ADX > 25 且上升** ➤ 趨勢加速中。
+
+    ---
+    ### 🌊 突破與反彈 (Breakout & Rebound)
+    * **+3 分**：🔥 **唐奇安突破** (創20日新高) ➤ 突破箱型整理。
+    * **+2 分**：🚀 **布林通道突破** (沿上軌噴出) ➤ 強勢飆股特徵。
+    * **+1 分**：💎 **負乖離過大** (< -12%) ➤ 短線超跌，留意反彈機會。
+
+    ---
+    **💡 操作建議：**
+    * **🔴 強力買進 (Score ≥ 6)**：籌碼、技術、動能全數共振。
+    * **🟠 偏多操作 (Score ≥ 2)**：大方向向上，可順勢操作。
+    * **🟢 建議賣出 (Score ≤ -3)**：觸發防禦扣分機制，嚴禁接刀。
+    """)
+
 
 # 2. --- 狀態管理 ---
 WATCHLIST_FILE = "watchlist.json"
@@ -100,22 +148,43 @@ def merge_realtime_data(df, realtime_data):
     if df is None or realtime_data is None: return df
     
     df_merged = df.copy()
-    last_date = df_merged.index[-1]
-    today = pd.Timestamp.today().normalize()
-    current_price = realtime_data['price']
     
-    if last_date < today:
+    # 1. 取得資料庫最後一筆日期
+    last_date = df_merged.index[-1]
+    
+    # 2. 取得「台北時間」的今天日期
+    # 雲端主機通常是 UTC，必須強制轉成 Asia/Taipei，否則早上會被誤判成昨天
+    tz = pytz.timezone('Asia/Taipei')
+    today = datetime.datetime.now(tz).date()
+    today_ts = pd.Timestamp(today) # 轉成 Pandas Timestamp 以便比較
+    
+    current_price = realtime_data['price']
+    current_vol = realtime_data.get('volume', 0) # 盤中累積成交量(估算)
+    
+    # 3. 判斷邏輯：如果歷史資料還停在「比今天早」的日子 (例如 1/23 < 1/26)
+    if last_date.date() < today:
+        # 建立今天的新 K 棒 (Open/High/Low/Close 先暫時都填現價，Volume 填 0 或 API 給的量)
+        # 注意：Fugle intraday quote 裡的 volume 通常是累積量，但也許要另外處理，這裡先暫時設 0 或用累積
         new_row = pd.DataFrame({
-            "Open": [current_price], "High": [current_price], 
-            "Low": [current_price], "Close": [current_price], "Volume": [0]
-        }, index=[today])
+            "Open": [current_price], 
+            "High": [current_price], 
+            "Low": [current_price], 
+            "Close": [current_price], 
+            "Volume": [0] # 暫時填 0，因為 K 線圖的 Volume 通常是看歷史，盤中即時量要看右邊數據
+        }, index=[today_ts])
+        
         df_merged = pd.concat([df_merged, new_row])
-    else:
-        df_merged.loc[last_date, 'Close'] = current_price
-        if current_price > df_merged.loc[last_date, 'High']:
-            df_merged.loc[last_date, 'High'] = current_price
-        if current_price < df_merged.loc[last_date, 'Low']:
-            df_merged.loc[last_date, 'Low'] = current_price
+    
+    # 4. 更新 (無論是剛新增的，或是原本就有的今天)
+    # 隨時更新今天的收盤價、最高、最低
+    target_date = df_merged.index[-1]
+    df_merged.loc[target_date, 'Close'] = current_price
+    
+    if current_price > df_merged.loc[target_date, 'High']:
+        df_merged.loc[target_date, 'High'] = current_price
+        
+    if current_price < df_merged.loc[target_date, 'Low']:
+        df_merged.loc[target_date, 'Low'] = current_price
             
     return df_merged
 
@@ -158,16 +227,19 @@ if st.sidebar.button("🗑️ 移除"):
     save_watchlist(st.session_state.watchlist)
     st.rerun()
 
+ # --- 🔥 新增：在移除按鈕下方，加入說明按鈕 ---
+st.sidebar.markdown("---") # 畫一條分隔線，比較好看
+if st.sidebar.button("❓ 評分標準說明"):
+    show_score_rules()
+
+
 if page == "📊 戰情總覽":
     st.title("📊 多檔股票戰情總覽")
     if not st.session_state.watchlist: st.info("清單是空的")
     else:
         # 1. 批次資料處理 (Batch Processing)
-        # 建立進度條，讓使用者知道程式正在跑
         progress_bar = st.progress(0, text="正在啟動戰情掃描雷達...")
-        
-        results_cache = [] # 用來儲存所有股票的分析結果
-        
+        results_cache = [] 
         total_stocks = len(st.session_state.watchlist)
         
         for i, symbol in enumerate(st.session_state.watchlist):
@@ -175,7 +247,6 @@ if page == "📊 戰情總覽":
             percent = int(((i) / total_stocks) * 100)
             progress_bar.progress(percent, text=f"正在分析 {symbol} ({i+1}/{total_stocks})...")
             
-            # API 呼叫緩衝
             time.sleep(1.0) 
             
             real_data = get_realtime_quote_full(symbol)
@@ -197,13 +268,15 @@ if page == "📊 戰情總覽":
                 stock_result["price"] = real_data['price']
                 stock_result["change"] = real_data['change']
                 stock_result["pct"] = real_data['change_percent']
-                stock_result["raw_real"] = real_data # 存起來等等畫卡片用
+                stock_result["raw_real"] = real_data
                 
                 hist_data = get_historical_data(symbol)
                 if hist_data is not None:
                     try:
                         df_merged = merge_realtime_data(hist_data, real_data)
-                        df_final = stock_logic.calculate_indicators(df_merged)
+                        
+                        # 🔥 傳入 symbol 讓 FinMind 抓資料
+                        df_final = stock_logic.calculate_indicators(df_merged, symbol)
                         logic_res = stock_logic.analyze_strategy(df_final)
                         
                         stock_result["score"] = logic_res["score"]
@@ -215,23 +288,19 @@ if page == "📊 戰情總覽":
             
             results_cache.append(stock_result)
 
-        progress_bar.empty() # 跑完後隱藏進度條
+        progress_bar.empty()
 
-        # 2. 顯示戰情總表 (Dashboard Table)
+        # 2. 顯示戰情總表
         st.subheader("📋 全域戰情排行榜")
         
         if results_cache:
-            # 整理成 DataFrame
             df_summary = pd.DataFrame(results_cache)
-            
-            # 挑選要顯示的欄位並改名
             display_df = df_summary[["symbol", "name", "price", "pct", "score", "signal", "stop_loss"]].copy()
             display_df.columns = ["代號", "名稱", "現價", "漲跌幅(%)", "AI總分", "訊號", "建議停損"]
             
-            # 使用 Streamlit 的資料框顯示功能 (支援排序)
             st.dataframe(
-                display_df.style.background_gradient(subset=["AI總分"], cmap="RdYlGn"), # 讓分數有顏色深淺
-                use_container_width=True,
+                display_df.style.background_gradient(subset=["AI總分"], cmap="RdYlGn"), 
+                width='stretch', # 🔥 修正: 改用 width='stretch'
                 hide_index=True,
                 column_config={
                     "現價": st.column_config.NumberColumn(format="%.2f"),
@@ -243,12 +312,11 @@ if page == "📊 戰情總覽":
 
         st.divider()
 
-        # 3. 顯示卡片牆 (Card View)
+        # 3. 顯示卡片牆
         st.subheader("🃏 個股詳細卡片")
         cols = st.columns(4)
         for i, data in enumerate(results_cache):
             with cols[i % 4]:
-                # 這裡直接用剛剛算好的 data，不用再 call API 了！
                 symbol = data["symbol"]
                 name = data["name"]
                 price = data["price"]
@@ -259,7 +327,6 @@ if page == "📊 戰情總覽":
                 
                 price_color = "#FF0000" if change > 0 else "#008000" if change < 0 else "#666666"
                 
-                # 簡單的卡片 HTML
                 st.markdown(f"""
                 <div style="border:1px solid #ddd; padding:10px; border-radius:10px; margin-bottom:10px; background-color:#1E1E1E;">
                     <div style="font-size:16px; font-weight:bold; color:#FFF;">
@@ -279,7 +346,6 @@ if page == "📊 戰情總覽":
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # 按鈕邏輯
                 st.button(f"🔍 詳細 {name}", key=f"btn_{symbol}", on_click=go_to_analysis, args=(symbol,))
 
 
@@ -296,8 +362,6 @@ elif page == "🔍 個股深度診斷":
     
     if target:
         st.session_state.target_stock = target
-        
-        # --- 週期選擇器 ---
         timeframe = st.radio("⏳ 選擇K線週期", ["日線", "週線", "月線"], index=0, horizontal=True)
         
         with st.spinner(f'正在分析：{target} ({timeframe})...'):
@@ -308,17 +372,15 @@ elif page == "🔍 個股深度診斷":
                 df_merged = merge_realtime_data(df_h, real)
                 df_resampled = resample_timeframe(df_merged, timeframe)
                 
-                # 🔥 使用共用邏輯 🔥
-                df_final = stock_logic.calculate_indicators(df_resampled)
+                # 🔥 傳入 target 讓 FinMind 抓資料
+                df_final = stock_logic.calculate_indicators(df_resampled, target)
                 result = stock_logic.analyze_strategy(df_final, timeframe)
                 
-                # 解包結果
                 curr = df_final.iloc[-1]
                 decision = result["decision"]
                 color = result["color"]
                 reports = result["report_list"]
                 
-                # 重組得分表字串
                 score_str = "**📝 詳細得分表：**\n\n"
                 for item, pts in result["score_details"]:
                     score_str += f"- {item}: {pts}\n"
@@ -384,7 +446,6 @@ elif page == "🔍 個股深度診斷":
                                     "代表主力正在偷吃貨，是大漲前兆！"
                                 )
                                 st.markdown(r, help=obv_msg)
-                            
                             elif "ADX" in r:
                                 adx_msg = (
                                     "💪 **【ADX 趨勢強度】**\n"
@@ -393,7 +454,6 @@ elif page == "🔍 個股深度診斷":
                                     "• 數值向上：代表趨勢正在加速中！"
                                 )
                                 st.markdown(r, help=adx_msg)
-
                             elif "ATR" in r:
                                 atr_msg = (
                                     "🛡️ **【ATR 波動率停損】**\n"
@@ -405,7 +465,6 @@ elif page == "🔍 個股深度診斷":
                                     "若跌破此價位，代表趨勢真的反轉了。"
                                 )
                                 st.markdown(r, help=atr_msg)
-                                 
                             else:
                                 st.markdown(r)
 
@@ -422,7 +481,7 @@ elif page == "🔍 個股深度診斷":
                     else: st.caption("盤後或無掛單資料")
 
                 st.subheader(f"📈 {timeframe} 技術圖表")
-                tab1, tab2 = st.tabs(["主圖 (K線+均線+通道+成交量)", "副圖 (MACD & KD)"])
+                tab1, tab2 = st.tabs(["主圖 (K線+均線+通道+成交量+籌碼)", "副圖 (MACD & KD)"])
                 
                 with tab1:
                     df_plot = df_final.tail(150).copy()
@@ -430,84 +489,102 @@ elif page == "🔍 個股深度診斷":
                     df_plot['DateStr'] = df_plot.index.strftime('%Y-%m-%d')
                     df_plot['Color'] = df_plot.apply(lambda x: '#FF0000' if x['Close'] >= x['Open'] else '#008000', axis=1)
 
+                    # --- 1. 建立子圖 (3列) ---
                     fig = make_subplots(
-                        rows=2, cols=1, 
-                        shared_xaxes=True, 
+                        rows=3, cols=1, 
+                        shared_xaxes=True, # 🔥 關鍵：讓三張圖共用 X 軸
                         vertical_spacing=0.05, 
-                        row_heights=[0.7, 0.3],
-                        subplot_titles=(f'{target} 走勢', '成交量')
+                        row_heights=[0.5, 0.25, 0.25], # 調整高度比例 (主圖大一點)
+                        subplot_titles=(f'{target} 走勢', '成交量', '法人籌碼 (投信)')
                     )
 
+                    # --- 2. 準備 Fibonacci 數值 ---
                     recent_df = df_plot.tail(60)
                     high_price = recent_df['High'].max()
                     low_price = recent_df['Low'].min()
-                    
                     diff = high_price - low_price
                     fib_0382 = high_price - (diff * 0.382)
                     fib_0618 = high_price - (diff * 0.618)
                     
-                    fig.add_shape(type="line",
-                        x0=recent_df['DateStr'].iloc[0], y0=fib_0382,
-                        x1=recent_df['DateStr'].iloc[-1], y1=fib_0382,
-                        line=dict(color="orange", width=1, dash="dot"),
-                        row=1, col=1
-                    )
-                    fig.add_annotation(x=recent_df['DateStr'].iloc[-1], y=fib_0382,
-                        text="Fib 0.382 (強勢回檔)", showarrow=False, xanchor="left", font=dict(color="orange"), row=1, col=1)
+                    # 畫 Fibonacci 線 (加在第1列)
+                    fig.add_shape(type="line", x0=recent_df['DateStr'].iloc[0], y0=fib_0382, x1=recent_df['DateStr'].iloc[-1], y1=fib_0382,
+                        line=dict(color="orange", width=1, dash="dot"), row=1, col=1)
+                    fig.add_annotation(x=recent_df['DateStr'].iloc[-1], y=fib_0382, text="Fib 0.382", showarrow=False, xanchor="left", font=dict(color="orange"), row=1, col=1)
 
-                    fig.add_shape(type="line",
-                        x0=recent_df['DateStr'].iloc[0], y0=fib_0618,
-                        x1=recent_df['DateStr'].iloc[-1], y1=fib_0618,
-                        line=dict(color="green", width=2, dash="dash"),
-                        row=1, col=1
-                    )
-                    fig.add_annotation(x=recent_df['DateStr'].iloc[-1], y=fib_0618,
-                        text="Fib 0.618 (支撐)", showarrow=False, xanchor="left", font=dict(color="green"), row=1, col=1)
+                    fig.add_shape(type="line", x0=recent_df['DateStr'].iloc[0], y0=fib_0618, x1=recent_df['DateStr'].iloc[-1], y1=fib_0618,
+                        line=dict(color="green", width=2, dash="dash"), row=1, col=1)
+                    fig.add_annotation(x=recent_df['DateStr'].iloc[-1], y=fib_0618, text="Fib 0.618 (支撐)", showarrow=False, xanchor="left", font=dict(color="green"), row=1, col=1)
 
-                    fig.add_shape(type="line", x0=recent_df['DateStr'].iloc[0], y0=high_price, x1=recent_df['DateStr'].iloc[-1], y1=high_price, line=dict(color="gray", width=1, dash="dot"), row=1, col=1)
-                    fig.add_shape(type="line", x0=recent_df['DateStr'].iloc[0], y0=low_price, x1=recent_df['DateStr'].iloc[-1], y1=low_price, line=dict(color="gray", width=1, dash="dot"), row=1, col=1)
-
+                    # --- 3. 繪製圖表 ---
+                    
+                    # Row 1: K線
                     fig.add_trace(go.Candlestick(
                         x=df_plot['DateStr'],
-                        open=df_plot['Open'],
-                        high=df_plot['High'],
-                        low=df_plot['Low'],
-                        close=df_plot['Close'],
-                        increasing_line_color='red', 
-                        decreasing_line_color='green',
-                        name='K線'
+                        open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'],
+                        increasing_line_color='red', decreasing_line_color='green', name='K線'
                     ), row=1, col=1)
                     
                     if 'MA5' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['MA5'], line=dict(color='#FFD700', width=1), name='MA5'), row=1, col=1)
                     if 'MA20' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['MA20'], line=dict(color='#0000FF', width=1), name='MA20'), row=1, col=1)
                     if 'BB_Upper' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['BB_Upper'], line=dict(color='purple', width=1, dash='dot'), name='布林上'), row=1, col=1)
                     if 'BB_Lower' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['BB_Lower'], line=dict(color='purple', width=1, dash='dot'), name='布林下'), row=1, col=1)
-                    if 'Donchian_High' in df_plot.columns: fig.add_trace(go.Scatter(x=df_plot['DateStr'], y=df_plot['Donchian_High'], line=dict(color='gray', width=1, dash='dash'), name='唐奇安上'), row=1, col=1)
 
+                    # Row 2: 成交量
                     fig.add_trace(go.Bar(
-                        x=df_plot['DateStr'],
-                        y=df_plot['Volume'],
-                        marker_color=df_plot['Color'],
-                        name='成交量'
+                        x=df_plot['DateStr'], y=df_plot['Volume'],
+                        marker_color=df_plot['Color'], name='成交量'
                     ), row=2, col=1)
 
+                    # Row 3: 法人籌碼 (投信)
+                    if 'Trust_Net' in df_plot.columns:
+                        trust_color = df_plot['Trust_Net'].apply(lambda x: 'red' if x > 0 else 'green')
+                        fig.add_trace(go.Bar(
+                            x=df_plot['DateStr'], 
+                            y=df_plot['Trust_Net'],
+                            marker_color=trust_color,
+                            name='投信買賣超'
+                        ), row=3, col=1)
+                    
+                    # 投信累計 (線圖)
+                    if 'Trust_Cum' in df_plot.columns:
+                        fig.add_trace(go.Scatter(
+                            x=df_plot['DateStr'],
+                            y=df_plot['Trust_Cum'],
+                            line=dict(color='orange', width=2),
+                            name='投信庫存(累計)',
+                            yaxis='y4'
+                        ), row=3, col=1)
+
+                    # --- 4. 版面設定 (關鍵優化) ---
+                    
+                    # 🔥 強制所有 X 軸都使用「類別」模式 (Category)
+                    # 這樣可以 1.完全對齊 2.自動隱藏週末空白
+                    fig.update_xaxes(type='category', tickmode='auto', nticks=10)
+                    
                     fig.update_layout(
-                        height=600,
+                        height=800,
                         margin=dict(l=20, r=20, t=30, b=20),
                         xaxis_rangeslider_visible=False,
-                        xaxis2=dict(
-                            type='category', 
-                            nticks=8, 
-                            tickangle=-0
+                        
+                        # 圖例設定 (放在最上面)
+                        showlegend=True, 
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="right",
+                            x=1
                         )
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
                     st.info("""
-                    **📉 黃金分割參考線說明：**
-                    * **🟠 Fib 0.382 (強勢回檔)**：股價回檔較淺，代表買盤強勁。若守住此線不破，通常是強勢股續攻的特徵。
-                    * **🟢 Fib 0.618 (黃金支撐)**：回檔至黃金比例，通常是波段操作 CP 值(風險回報比) 最佳的進場點。
+                    **📉 觀察重點：**
+                    * **三圖連動**：現在拖動 K 線圖，下面的成交量與投信籌碼會完全同步縮放。
+                    * **Fibonacci**：橘色(0.382)為強勢回檔，綠色(0.618)為黃金買點。
+                    * **🏦 投信籌碼**：紅柱連發代表投信認養，橘線(累計庫存)創新高代表籌碼穩定集中。
                     """)
+
                 
                 with tab2:
                     st.caption("KD 指標 (紅K / 藍D)")
